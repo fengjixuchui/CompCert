@@ -327,8 +327,6 @@ let expand_builtin_inline name args res =
   (* Synchronization *)
   | "__builtin_membar", [], _ ->
      ()
-  | "__builtin_nop", [], _ ->
-     emit Pnop
   (* Byte swap *)
   | ("__builtin_bswap" | "__builtin_bswap32"), [BA(IR a1)], BR(IR res) ->
      emit (Prev(W, res, a1))
@@ -435,7 +433,7 @@ let preg_to_dwarf = function
 let expand_function id fn =
   try
     set_current_function fn;
-    expand id (* sp= *) 2 preg_to_dwarf expand_instruction fn.fn_code;
+    expand id (* sp= *) 31 preg_to_dwarf expand_instruction fn.fn_code;
     Errors.OK (get_current_function ())
   with Error s ->
     Errors.Error (Errors.msg (coqstring_of_camlstring s))
