@@ -115,11 +115,10 @@ Definition is_float_reg (r: mreg) :=
   with one integer result. *)
 
 Definition loc_result (s: signature) : rpair mreg :=
-  match s.(sig_res) with
-  | None => One R10
-  | Some (Tint | Tany32) => One R10
-  | Some (Tfloat | Tsingle | Tany64) => One F10
-  | Some Tlong => if Archi.ptr64 then One R10 else Twolong R11 R10
+  match proj_sig_res s with
+  | Tint | Tany32 => One R10
+  | Tfloat | Tsingle | Tany64 => One F10
+  | Tlong => if Archi.ptr64 then One R10 else Twolong R11 R10
   end.
 
 (** The result registers have types compatible with that given in the signature. *)
@@ -128,8 +127,8 @@ Lemma loc_result_type:
   forall sig,
   subtype (proj_sig_res sig) (typ_rpair mreg_type (loc_result sig)) = true.
 Proof.
-  intros. unfold proj_sig_res, loc_result, mreg_type;
-  destruct (sig_res sig) as [[]|]; auto; destruct Archi.ptr64; auto.
+  intros. unfold loc_result, mreg_type;
+  destruct (proj_sig_res sig); auto; destruct Archi.ptr64; auto.
 Qed.
 
 (** The result locations are caller-save registers *)
@@ -139,7 +138,7 @@ Lemma loc_result_caller_save:
   forall_rpair (fun r => is_callee_save r = false) (loc_result s).
 Proof.
   intros. unfold loc_result, is_callee_save;
-  destruct (sig_res s) as [[]|]; simpl; auto; destruct Archi.ptr64; simpl; auto.
+  destruct (proj_sig_res s); simpl; auto; destruct Archi.ptr64; simpl; auto.
 Qed.
 
 (** If the result is in a pair of registers, those registers are distinct and have type [Tint] at least. *)
@@ -149,13 +148,13 @@ Lemma loc_result_pair:
   match loc_result sg with
   | One _ => True
   | Twolong r1 r2 =>
-       r1 <> r2 /\ sg.(sig_res) = Some Tlong
+       r1 <> r2 /\ proj_sig_res sg = Tlong
     /\ subtype Tint (mreg_type r1) = true /\ subtype Tint (mreg_type r2) = true 
     /\ Archi.ptr64 = false
   end.
 Proof.
   intros.
-  unfold loc_result; destruct (sig_res sg) as [[]|]; auto.
+  unfold loc_result; destruct (proj_sig_res sg); auto.
   unfold mreg_type; destruct Archi.ptr64; auto.
   split; auto. congruence.
 Qed.
@@ -165,7 +164,7 @@ Qed.
 Lemma loc_result_exten:
   forall s1 s2, s1.(sig_res) = s2.(sig_res) -> loc_result s1 = loc_result s2.
 Proof.
-  intros. unfold loc_result. rewrite H; auto.  
+  intros. unfold loc_result, proj_sig_res. rewrite H; auto.  
 Qed.
 
 (** ** Location of function arguments *)
@@ -265,24 +264,6 @@ Fixpoint loc_arguments_rec (va: bool)
 
 Definition loc_arguments (s: signature) : list (rpair loc) :=
   loc_arguments_rec s.(sig_cc).(cc_vararg) s.(sig_args) 0 0.
-
-(** [size_arguments s] returns the number of [Outgoing] slots used
-  to call a function with signature [s]. *)
-
-Definition max_outgoing_1 (accu: Z) (l: loc) : Z :=
-  match l with
-  | S Outgoing ofs ty => Z.max accu (ofs + typesize ty)
-  | _ => accu
-  end.
-
-Definition max_outgoing_2 (accu: Z) (rl: rpair loc) : Z :=
-  match rl with
-  | One l => max_outgoing_1 accu l
-  | Twolong l1 l2 => max_outgoing_1 (max_outgoing_1 accu l1) l2
-  end.
-
-Definition size_arguments (s: signature) : Z :=
-  List.fold_left max_outgoing_2 (loc_arguments s) 0.
 
 (** Argument locations are either non-temporary registers or [Outgoing]
   stack slots at nonnegative offsets. *)
@@ -388,54 +369,14 @@ Proof.
   unfold loc_arguments; intros. eapply loc_arguments_rec_charact; eauto. omega.
 Qed.
 
-(** The offsets of [Outgoing] arguments are below [size_arguments s]. *)
-
-Remark fold_max_outgoing_above:
-  forall l n, fold_left max_outgoing_2 l n >= n.
-Proof.
-  assert (A: forall n l, max_outgoing_1 n l >= n).
-  { intros; unfold max_outgoing_1. destruct l as [_ | []]; xomega. }
-  induction l; simpl; intros. 
-  - omega.
-  - eapply Zge_trans. eauto.
-    destruct a; simpl. apply A. eapply Zge_trans; eauto.
-Qed.
-
-Lemma size_arguments_above:
-  forall s, size_arguments s >= 0.
-Proof.
-  intros. apply fold_max_outgoing_above.
-Qed.
-
-Lemma loc_arguments_bounded:
-  forall (s: signature) (ofs: Z) (ty: typ),
-  In (S Outgoing ofs ty) (regs_of_rpairs (loc_arguments s)) ->
-  ofs + typesize ty <= size_arguments s.
-Proof.
-  intros until ty.
-  assert (A: forall n l, n <= max_outgoing_1 n l).
-  { intros; unfold max_outgoing_1. destruct l as [_ | []]; xomega. }
-  assert (B: forall p n,
-             In (S Outgoing ofs ty) (regs_of_rpair p) ->
-             ofs + typesize ty <= max_outgoing_2 n p).
-  { intros. destruct p; simpl in H; intuition; subst; simpl.
-  - xomega.
-  - eapply Z.le_trans. 2: apply A. xomega.
-  - xomega. }
-  assert (C: forall l n,
-             In (S Outgoing ofs ty) (regs_of_rpairs l) ->
-             ofs + typesize ty <= fold_left max_outgoing_2 l n).
-  { induction l; simpl; intros.
-  - contradiction.
-  - rewrite in_app_iff in H. destruct H.
-  + eapply Z.le_trans. eapply B; eauto. apply Z.ge_le. apply fold_max_outgoing_above.
-  + apply IHl; auto.
-  }
-  apply C. 
-Qed.
-
 Lemma loc_arguments_main:
   loc_arguments signature_main = nil.
 Proof.
   reflexivity.
 Qed.
+
+(** ** Normalization of function results *)
+
+(** No normalization needed. *)
+
+Definition return_value_needs_normalization (t: rettype) := false.
