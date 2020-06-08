@@ -81,8 +81,12 @@ let define_idents p =
     string_of_atom
     (fun (id, name) ->
       try
-        fprintf p "Definition _%s : ident := %ld%%positive.@ "
-                  (sanitize name) (P.to_int32 id)
+        if !use_canonical_atoms && id = pos_of_string name then
+          fprintf p "Definition _%s : ident := $\"%s\".@ "
+                    (sanitize name) name
+        else
+          fprintf p "Definition _%s : ident := %ld%%positive.@ "
+                    (sanitize name) (P.to_int32 id)
       with Not_an_identifier ->
         ());
   iter_hashtbl_sorted
@@ -93,9 +97,11 @@ let define_idents p =
   fprintf p "@ "
 
 let name_temporary t =
-  let t1 = P.to_int t and t0 = P.to_int (first_unused_ident ()) in
-  if t1 >= t0 && not (Hashtbl.mem temp_names t)
-  then Hashtbl.add temp_names t (sprintf "_t'%d" (t1 - t0 + 1))
+  if not (Hashtbl.mem string_of_atom t) && not (Hashtbl.mem temp_names t)
+  then begin
+    let t1 = P.to_int t and t0 = P.to_int (first_unused_ident ()) in
+    Hashtbl.add temp_names t (sprintf "_t'%d" (t1 - t0 + 1))
+  end
 
 let name_opt_temporary = function
   | None -> ()
@@ -247,8 +253,6 @@ let signatur p sg =
      astrettype sg.sig_res
      callconv sg.sig_cc
 
-let assertions = ref ([]: (string * typ list) list)
-
 let external_function p = function
   | EF_external(name, sg) ->
       fprintf p "@[<hov 2>(EF_external %a@ %a)@]" coqstring name signatur sg
@@ -264,14 +268,15 @@ let external_function p = function
   | EF_free -> fprintf p "EF_free"
   | EF_memcpy(sz, al) ->
       fprintf p "(EF_memcpy %ld %ld)" (Z.to_int32 sz) (Z.to_int32 al)
-  | EF_annot(kind,text, targs) ->
-      assertions := (camlstring_of_coqstring text, targs) :: !assertions;
-      fprintf p "(EF_annot %a %a)" coqstring text (print_list asttype) targs
-  | EF_annot_val(kind,text, targ) ->
-      assertions := (camlstring_of_coqstring text, [targ]) :: !assertions;
-      fprintf p "(EF_annot_val %a %a)" coqstring text asttype targ
+  | EF_annot(kind, text, targs) ->
+      fprintf p "(EF_annot %ld%%positive %a %a)"
+                (P.to_int32 kind) coqstring text (print_list asttype) targs
+  | EF_annot_val(kind, text, targ) ->
+      fprintf p "(EF_annot_val %ld%%positive %a %a)"
+                (P.to_int32 kind) coqstring text asttype targ
   | EF_debug(kind, text, targs) ->
-      fprintf p "(EF_debug %ld%%positive %ld%%positive %a)" (P.to_int32 kind) (P.to_int32 text) (print_list asttype) targs
+      fprintf p "(EF_debug %ld%%positive %ld%%positive %a)"
+                (P.to_int32 kind) (P.to_int32 text) (print_list asttype) targs
   | EF_inline_asm(text, sg, clob) ->
       fprintf p "@[<hov 2>(EF_inline_asm %a@ %a@ %a)@]"
               coqstring text
@@ -441,61 +446,13 @@ let print_composite_definition p (Composite(id, su, m, a)) =
     (print_list (print_pair ident typ)) m
     attribute a
 
-(* Assertion processing *)
-
-let re_annot_param = Str.regexp "%%\\|%[1-9][0-9]*"
-
-type fragment = Text of string | Param of int
-
-(* For compatibility with OCaml < 4.00 *)
-let list_iteri f l =
-  let rec iteri i = function
-  | [] -> ()
-  | a::l -> f i a; iteri (i + 1) l
-  in iteri 0 l
-
-let print_assertion p (txt, targs) =
-  let frags =
-    List.map
-      (function
-       | Str.Text s -> Text s
-       | Str.Delim "%%" -> Text "%"
-       | Str.Delim s -> Param(int_of_string(String.sub s 1 (String.length s - 1))))
-      (Str.full_split re_annot_param txt) in
-  let max_param = ref 0 in
-  List.iter
-    (function
-     | Text _ -> ()
-     | Param n -> max_param := max n !max_param)
-    frags;
-  fprintf p "  | \"%s\"%%string, " txt;
-  list_iteri
-    (fun i targ -> fprintf p "_x%d :: " (i + 1))
-    targs;
-  fprintf p "nil =>@ ";
-  fprintf p "    ";
-  List.iter
-    (function
-     | Text s -> fprintf p "%s" s
-     | Param n -> fprintf p "_x%d" n)
-    frags;
-  fprintf p "@ "
-
-let print_assertions p =
-  if !assertions <> [] then begin
-    fprintf p "Definition assertions (txt: string) args : Prop :=@ ";
-    fprintf p "  match txt, args with@ ";
-    List.iter (print_assertion p) !assertions;
-    fprintf p "  | _, _ => False@ ";
-    fprintf p "  end.@ @ "
-  end
-
 (* The prologue *)
 
 let prologue = "\
 From Coq Require Import String List ZArith.\n\
 From compcert Require Import Coqlib Integers Floats AST Ctypes Cop Clight Clightdefs.\n\
-Local Open Scope Z_scope.\n"
+Local Open Scope Z_scope.\n\
+Local Open Scope string_scope.\n"
 
 (* Naming the compiler-generated temporaries occurring in the program *)
 
@@ -554,15 +511,15 @@ let name_program p =
 
 let print_clightgen_info p sourcefile normalized =
   fprintf p "@[<v 2>Module Info.";
-  fprintf p "@ Definition version := %S%%string." Version.version;
-  fprintf p "@ Definition build_number := %S%%string." Version.buildnr;
-  fprintf p "@ Definition build_tag := %S%%string." Version.tag;
-  fprintf p "@ Definition arch := %S%%string." Configuration.arch;
-  fprintf p "@ Definition model := %S%%string." Configuration.model;
-  fprintf p "@ Definition abi := %S%%string." Configuration.abi;
+  fprintf p "@ Definition version := %S." Version.version;
+  fprintf p "@ Definition build_number := %S." Version.buildnr;
+  fprintf p "@ Definition build_tag := %S." Version.tag;
+  fprintf p "@ Definition arch := %S." Configuration.arch;
+  fprintf p "@ Definition model := %S." Configuration.model;
+  fprintf p "@ Definition abi := %S." Configuration.abi;
   fprintf p "@ Definition bitsize := %d." (if Archi.ptr64 then 64 else 32);
   fprintf p "@ Definition big_endian := %B." Archi.big_endian;
-  fprintf p "@ Definition source_file := %S%%string." sourcefile;
+  fprintf p "@ Definition source_file := %S." sourcefile;
   fprintf p "@ Definition normalized := %B." normalized;
   fprintf p "@]@ End Info.@ @ "  
   
@@ -588,5 +545,4 @@ let print_program p prog sourcefile normalized =
   fprintf p "Definition prog : Clight.program := @ ";
   fprintf p "  mkprogram composites global_definitions public_idents %a Logic.I.@ @ "
             ident prog.Ctypes.prog_main;
-  print_assertions p;
   fprintf p "@]@."
